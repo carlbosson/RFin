@@ -1,0 +1,166 @@
+
+Load the necessary Rpackages and set your working directory
+```{r}
+library('data.table') #numerical summaries, etc
+library('readxl')
+library('copula')#copula estimation
+library('rgl') #3D plotting
+rm(list = ls()) #clear workspace
+setwd("~/WD/")
+```
+
+(1) Design Rfunction to calculate distance-to-default using Merton’s approach
+- Purpose: to obtain distance-to default, A0 (the value of the assets at the initial time), σA (volatility of the assets) and probability of default
+- Input: the arguments of our Rfunction Merton
+  * par = numeric vector of lenght 2 with initial values for our unknown quatities A0 (found by optimization)
+  * E0 =value of company’s equity at time 0, 
+  * D = value of the debt, a number.
+  * sigmaE= is volatility of equity, a number
+  * r=risk-free interest rate (matching T), a number
+  * T= time-to-expiry of the option, a number
+  * lower= numeric vector of lenght 2 with the lower bounds for the parameters of interest, (A0 and sigmaA) that is passed to function 'optim'
+  * upper=numeric vector of lenght 2 with the upper bounds for the parameters of interest, (A0 and sigmaA) that is passed to function 'optim'
+- Output: a list with the target A0, sigmaA, Distance-to -default and probability of default, numbers
+```{r}
+Merton<-function(par,E0,sigmaE,r,T,D,lower,upper)
+{
+  #function to be minimized
+  myfun<-function(par,E0,sigmaE,r,T,D)
+  {
+    A0<-par[1]
+    sigmaA<-par[2]
+    d1<-(log(A0/D)+(r+sigmaA^2/2)*T)/(sigmaA*sqrt(T))
+    d2<-d1-sigmaA*sqrt(T)
+    return((E0-A0*pnorm(d1)+exp(-r*T)*D*pnorm(d2))^2
+           +(sigmaE*E0-pnorm(d1)*sigmaA*A0)^2)
+  }
+  # par contains initial values
+  result<-optim(par=par, fn=myfun, gr = NULL,
+                E0=E0, sigmaE=sigmaE, r=r, T=T, D=D,
+                method= "L-BFGS-B", lower=lower, upper=upper)
+  A0<-round(x=result$par[1],2) #to extract sigmaA
+  sigmaA<-round(x=result$par[2],digits=2) #to extract sigmaA
+  d1<-(log(A0/D)+(myrate+sigmaA^2/2)*T)/(sigmaA*sqrt(T))
+  d2d<-round(d1-sigmaA*sqrt(T),2) #distance-to-default
+  probD<-round(pnorm(-d2d),2) #probability of default
+  newlist<-list(A0, sigmaA,d2d,probD)
+  names(newlist) <- c("A0", "sigmaA","Distance-to-Default","Prob. of Default")
+  return(newlist)
+}
+```
+(2) Get my ticker-specific data
+- Purpose: extract the accounting data correpondig to the ticker provided, state Rvariables 'myticker', 'myrow', 'today' and 'start', containing the specific ticker of the company, the ticker-specific accounting information, the date of the ticker and the date correponding to one year ago from our 'today', respectively.
+- Input: "AccountingData.xlsx" file with accounting data and 'Data Date' numbers and ticker Symbol a character
+- Output: 'myticker' a character; 'my row' a row with 14 coulmns; 'today' a numeric string representing the date in format yyyymmdd; and 'start' a numeric string representing the date in format yyyymmdd
+```{r}
+myticker<-'MRK' #CHANGE YOUR TICKER
+account<-as.data.frame(read_excel(path = "AccountingData.xlsx",col_names = TRUE))
+list #load the data to extract the ticker-specific information
+myrow<-account[account$'Ticker Symbol'==myticker,]#extract the right row from my accounting data
+myrow
+str(myrow)
+
+today<- myrow$`Data Date` 
+start<- as.numeric(format(as.Date(as.character(today),"%Y%m%d")-365,'%Y%m%d'))
+```
+(3) Estimate sigmaE (the volatility of the equity) based on historical stock prices 
+- Purpose: to estimate sigmaE (volatility of the equity) with historical prices matching the length of time-to-expiry T (a subset of the 'StockPrices' data); because it is needed to find distance-to-default decribed by Merton's approach
+- Input: 'StockPrices.txt' file, the dates ('today' and 'start') corresponding to one year of historical daily prices between 'today' and 'start' for our specific ticker 'myticker'
+- Output: sigmaE, the volatility of the equity, a number
+```{r}
+prices<-read.table('StockPrices.txt', header=TRUE) #load the prices
+myp<-prices[prices$yyyymmdd>=start&prices$yyyymmdd <= today, myticker] #we extract the relevant 
+sigmaE<-round(sd(diff(log(myp)),na.rm=TRUE)*sqrt(252),2)
+sigmaE
+```
+(4) Get the risk free rate INPUT
+- Purpose: it is needed in the Rfunction 'Merton'. One rule to obtain estimates particularly of A0 (the value of the assets at the initial time) and σA (volatility of the assets), is to use today’s rfree with maturity matching T, that's why we need to get it.
+- Input: "DailyTreasuryYieldCurveRates.txt" and date 'today'.
+- Output: the risk free rate with maturity matching T in decimal format, a number
+```{r}
+rates<- read.csv("DailyTreasuryYieldCurveRates.txt", header= TRUE, sep="")
+myrate<- rates[rates$yyyymmdd==today,'X1.YR']*.01 #get the rfree with maturity matching T and transfrom it to decimals
+myrate
+```
+(5) MORE INPUTS
+First we set initial values of the arguments of RFunction Merton 
+- Purpose: extract from 'myrow' (ticker-specific data) the accounting data needed for the arguments of RFunction 'Merton' (ie. D, E0 ,T, A0ini & sigmaAini (for par, lower and upper))
+- Input: 
+  * For shortterm: 'Accounts Payable' and 'short/current LT debt' for the specific ticker, numbers
+  * For longterm: 'Long-Term Debt - Total' and 'Long-Term Debt Due in One Year' for the specific ticker, numbers
+  * For D: the previous computed shortterm & longterm Rvariables, numbers
+  *For stock:
+- Output: 
+```{r}
+shortterm<-myrow$`Accounts Payable - Trade`+myrow$`Long-Term Debt Due in One Year` #ST debt= accounts payable + 'short/current LT debt'
+longterm<-myrow$`Long-Term Debt - Total`-myrow$`Long-Term Debt Due in One Year`# LT debt= Total LT debt -LT debt due in 1y
+D<-shortterm+0.5*longterm #Compute debt 
+stock<-myrow$`Common Shares Outstanding` #’shares outstanding’ in 1,000,000s
+P0<-as.numeric(tail(myp,1))
+E0<-round(P0*stock,2)
+T<-1; A0ini<-E0+D; sigmaAini<-0.1
+```
+(6) Compute my results
+- Purpose: to obtain the 
+- Input: all the prevoiusly obtained arguments. E0, sigmaE, r, T, D, A=ini (for lowe & upper); which are all numbers
+- Output: a list with the target A0, sigmaA, Distance-to -default and probability of default, numbers
+```{r}
+myresult<-Merton(par=c(A0ini,sigmaAini),E0=E0,sigmaE=sigmaE,
+                 r=myrate,T=T,D=D,
+                 lower=c(A0ini*0.001,0.001),#multiply it by sth small to get a small
+                 upper=c(A0ini*10,4))
+myresult
+```
+## 
+(1)
+- Purpose: 
+- Input: 
+- Output: 
+```{r}
+mytickers<-c('BA', 'INTC')
+start_date<- 20180117
+end_date<- 20191203
+
+#now we load the prices subset
+myprices<-read.table('StockPrices.txt', header=TRUE)
+
+#we extract the relevant 
+myp<-myprices[myprices$yyyymmdd>=start_date&myprices$yyyymmdd <= end_date, mytickers]
+myp
+
+#now we need to obtain daily log returns
+x<-apply(log(myp),2,'diff') # a matrix (many rows by 2 coulmns) with log returns
+u <- pobs(x) #convert x to pseudo observations u
+round(head(x,1),4) #for oldest
+round(head(u,1),4) #for oldest
+
+round(tail(x,1),4) #for most recent
+round(tail(u,1),4) #for most recent
+
+par(mfrow=c(1,2),mar=c(4, 4, 1, 1))
+
+F1<-ecdf(x[,1])
+F2<-ecdf(x[,2])
+par(mfrow=c(1,2),mar=c(4, 4, 1, 1))
+
+myfit.clayton<-fitCopula(copula=claytonCopula(param=0.1,dim=2),
+                         data=u,method='itau')
+myfit.clayton
+round(coef(myfit.clayton),4)
+
+#extract a specific number form the object
+mycopula.clayton <- claytonCopula(param=coef(myfit.clayton),dim=2)
+par(mfrow=c(1,2),mar=c(2, 4, 1, 1))
+
+#Estimate the joint probability P(X1 ≤ −0.027, X2 ≤ −0.033)
+x1<- -0.016
+x2<- -0.041
+u0<-matrix(c(F1(x1),F2(x2)),nrow=1)
+round(u0,4)
+
+#convert x1 and x2 to pobs (using ECDFs) and save as a 1x2 matrix
+p0.clayton<-pCopula(u=u0,copula=mycopula.clayton) #Prob(X1<=x1,X2<=x2)
+round(p0.clayton,4)
+
+
+```

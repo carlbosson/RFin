@@ -1,0 +1,234 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load the necessary Rpackages and set your working directory
+```{r}
+rm(list = ls()) #clear workspace
+
+library('data.table') #numerical summaries, etc
+library('readxl')
+library('wmtsa') # wavelet transform
+
+setwd("~/wd/")
+```
+
+(1) Get my data
+- Purpose: To retrieve the data and extract the subset between the give dates to perform MODWT and MRD on the term spread 'TMS' later on.
+- Input: 
+  * The 'PredictorData2019.xlsx' excel file. Store to 'mydata'.
+  * The starting and ending dates in yyyymm format, numbers.
+- Output: 
+  * 'mydata' is a data.table with 1788 rows and 18 columns. 
+  * 'mydata_sub' is a data.table extracted form 'mydata' correponding to the data between 'yyyymm_start' and 'yyyymm_end' dates  
+  * 'yyyymm_start' r variable containing the starting date in yyyymm format, a number
+  * 'yyyymm_end' r variable containing the ending date in yyyymm format, a number
+```{r}
+yyyymm_start<- 197810
+yyyymm_end<-201812
+
+filename<-'PredictorData2019.xlsx'
+mydata<-as.data.frame(read_excel(path=filename,sheet='Monthly', na='NaN'))
+
+mydata_sub<-mydata[mydata$yyyymm>=yyyymm_start&mydata$yyyymm<=yyyymm_end,]
+```
+(2) Calculate the term spread 'TMS' and plot it.
+- Purpose: to calculate the term spread 'TMS' for which we will perform MODWT and MRD later on. 
+- Input: the columns from 'mydata_sub', 'lty' and tbl', column vectors.
+- Output: a numeric vector of lenght equal to the num of rows in 'mydata' (i.e. 535) containig the term spread, i.e the difference between the US 10-year government bond yield (column 'lty') and the 3-month T-bill (column 'tbl').
+```{r}
+TMS=mydata_sub$lty-mydata_sub$tbl #Term spread- sequence input
+plot.ts(TMS,main=paste('Term spread 10Y bond and 3MO t-bill')) 
+```
+
+(3) Perform the MODWT on 'TMS'
+- Purpose: to perform Maximum Overlap Discrete Wavelet Transform (MODWT) on 'TMS' (ie, find wavelet and scaling coefficients) with wavelet filter 's8' and for J0=6 levels. 
+- Input: 
+  * the term spread Rvector 'TMS' for x (a vector containing a uniformly-sampled real-valued time series)
+  * 's8' for wavelet, a character string denoting the filter type (default: s8 least asym filter of lenght 8)
+  * 6 for n.levels, the number of decomposition levels.
+- Output: 
+  * a collection of all wavelet coefficients and the scaling coefficients at the last level, a list
+```{r}
+TMS_modwt<-wavMODWT(x=TMS, wavelet='s8', n.levels=6) #variation
+TMS_modwt
+```
+(4) Sample variance
+- Purpose: to find sample variance of level j=1,2,...,6 MODWT wavelet coefficients and scaling coefficients for level j=6 MODWT. In addition, find the sample variance of ’TMS’.
+- Input:  
+  * the term spread Rvector 'TMS' for x (a vector containing a uniformly-sampled real-valued time series)
+  * 'mowdt' for xform, a character string denoting the type of wavelet transform
+  * 's8' for wavelet, a character string denoting the filter type (default: s8 least asym filter of lenght 8)
+  * 6 for n.levels, the number of decomposition levels.
+- Output: 
+  * the discrete sample wavelet variance, an object?? a list??
+  * Extract sample variances of levels 1 to 6 MODWT wavelet coefficients of TMS, a named vector (numbers)
+  * Extract the sample variance of level 6 MODWT scaling coefficients of TMS, a number
+  * Sample variance of TMS time series, a number
+```{r}
+TMS_wavevar<- wavVar(x=TMS,xform='modwt',wavelet='s8',n.levels=6)
+
+round(TMS_wavevar$block$biased,6) 
+
+round(var(TMS_modwt$data$s6),6) 
+
+round(var(TMS),6) # sample variance of TMS
+```
+(5) Compute MRD of 'TMS'
+- Purpose: to obtain the multi-resolution decomposition (MRD) of 'TMS' (ie, find the details D1,D2,...,D6 and the smooth S6)
+- Input: 'TMS_modwt' the collection of all wavelet coefficients and the scaling coefficients at the last level, a list 
+- Output: a matrix
+```{r}
+TMS_mrd<-as.matrix(wavMRD(TMS_modwt))
+```
+(6) Variables TMS_hf,TMS_bcf and TMS_lf
+- Purpose: to create variable TMS_hf, TMS_bcf and TMS_lf used in Faria and Verona (2019) and plot them (useful in predicting equity risk premium).
+- Input: 
+- Output: 
+```{r}
+#sum hf1 and bc1 row-wise to get the appropriate values 
+TMS_hf<-rowSums(TMS_mrd[,c('D1','D2','D3')])
+TMS_bcf<-rowSums(TMS_mrd[,c('D4','D5','D6')])
+TMS_lf<-TMS_mrd[,'S6']
+
+#plot the values
+plot.ts(TMS_hf, main=paste('TMS_HF'))
+plot.ts(TMS_bcf, main=paste('TMS_BCF'))
+plot.ts(TMS_lf, main=paste('TMS_LF'))
+```
+(7) 
+```{r}
+
+```
+
+
+(1) Get my data
+- Purpose: To retrieve data in order to fit the Fama-French 5-factor model to their daily returns for given companies and dates.
+- Input: 
+  * The 'StockPrices' -file. Store to 'myprices'.
+  * The 'F-F_Research_Data_5_Factors_2x3_daily' -file. Store to 'myfactordata'.
+
+- Output: 
+  * Start date and end date, numbers with format yyyymmdd
+  * Relevant observations between the given dates, both the daily stock returns for the given tickers, as well as the FF5 estimates.
+  
+```{r}
+library('kohonen') #SOM algorithm
+library('data.table')
+
+myprices<-read.table('StockPrices.txt', header=TRUE,na="NA")
+myfactordata<-read.table('F-F_Research_Data_5_Factors_2x3_daily.txt', row.names = NULL, sep="", skip = 2, colClasses = "numeric")
+colnames(myfactordata)[1]<-"yyyymmdd"
+
+sr<-function(p) {diff(p)/p[-length(p)]}
+
+Returns<-apply(X=myprices[3:ncol((myprices))],MARGIN=2,FUN="sr")
+Returns<-Returns*100
+
+yyyymmdd<-myprices$yyyymmdd[2:nrow(myprices)]
+Returns<-data.frame(cbind(yyyymmdd,Returns))
+start_date<- 20170123
+end_date<-20200109
+mytickers<-c('PAYX','RJF','AMT','EMN','PHM','PNW','AME','DISCA','BMY','ETFC','HIG','IDXX','CERN','TDG','MHK','AES','EL','XEL','AIG','GOOGL','STZ','ADI','WDC','MSFT','CCI','ES','FLS','COF','PG','TTWO')
+
+Returns <- Returns[Returns$yyyymmdd>= start_date & Returns$yyyymmdd<= end_date, mytickers ]
+FF5 <- subset(myfactordata, yyyymmdd <=end_date  & yyyymmdd >= start_date)
+
+CompleteDataSet <- cbind(Returns, FF5[,-1])
+
+
+
+```
+(2) Fit the FF5 model
+- Purpose: To fit the Fama-French 5-factor model to the returns of the given 30 companies, in order to retrieve the input data for the SOM and PCA analysis.
+- Input: 
+ * The data set with the daily returns for the given companies and the FF5 estimates.
+- Output: A 30x7 matrix, called 'X', containing the parameter estimates based on the fits for the given companies (30 tickers)
+
+```{r}
+mylm<-function(y,x1,x2,x3,x4,x5)
+{
+  fit<-lm(y~x1+x2+x3+x4+x5,na.action='na.omit')
+  IVOL<-summary(fit)$sigma
+  coefficients<-c(coef(fit),IVOL)
+  coefficients<-as.numeric(coefficients)
+  return(coefficients)
+}
+
+
+dt<-data.table(CompleteDataSet)
+dt.molten<-melt.data.table(data=dt,id.vars=c("Mkt.RF","SMB","HML","RMW", "CMA","RF"),
+                      variable.name='ticker',value.name='r')
+dt.molten
+#the order in which the quotes are written after the estimate, is the order that the values will be
+dt.fit <- dt.molten[,.(value=mylm(y=r-RF,x1=Mkt.RF,x2=SMB,x3=HML,x4=RMW, x5=CMA),
+                     estimate=c('alphahat','betahat','shat','hhat','rhat', 'chat', 'sigmahat')),by=.(ticker)]
+dt.fit
+dt.fit.cast<-dcast.data.table(data=dt.fit,ticker~estimate)
+dt.fit.cast
+
+X<-dt.fit.cast[,.(alphahat,betahat,shat,hhat, rhat, chat, sigmahat)]
+X<-as.data.frame(X)
+rownames(X)<-unlist(dt.fit.cast[,.(ticker)])
+str(X)
+
+```
+(4) 
+- Purpose: 
+  * To perform a unsupervised self-organizing map (SOM) algorithm on the 30x7 matrix 'X'
+  * Identifying the nodes for each company that is included in our model
+  * To extract the centroids for each company in order to analyze their node location
+- Input: 
+  * Random seed implemented for the SOM
+  * A Standardized 3x3 hexagonal map for the 'X' matrix (treated as an Rfunction)
+  * A dataframe containing node information for each company 
+- Output:
+  * Visualization of the SOM results
+  * 3 subplots visualizing: 'counts', 'mapping' & 'codes'
+  * The location of each company within the nodes and their centroids
+```{r}
+set.seed(730)
+mynode<- 4
+mysom <- som(X=scale(as.matrix(X)), grid = somgrid(3, 3, 'hexagonal'))
+
+par(mfrow=c(2,2),mar=c(2, 4, 1, 1),cex=0.8)
+plot(mysom,type='counts')
+plot(mysom,type='mapping',labels=rownames(X))
+plot(mysom,type='codes')
+
+info<-data.frame(ticker=rownames(X),node=mysom$unit.classif)
+info$node
+
+numbers <- table(info$node)
+
+
+mysom$codes
+codes<-data.frame(mysom$codes)
+c(numbers[names(numbers)==mynode],codes[mynode,]) 
+
+```
+(5) 
+- Purpose: 
+  * To analyze the relationship between the principal components of 'X' by numerical and graphical outputs
+- Input: 
+  * Random seed for the principal component analysis
+  * 'X' as a correlation-based matrix
+  *
+- Output: 
+  * Seven Red Arrow Vectors with the coordinates for: alphahat, betahat, shat, hhat, rhat, chat and sigmahat.
+  * A Biplot with axes describing: 
+    - PC1 score(Bottom)
+    - PC2 score(Left)
+    - PC1 load(Top)
+    - PC2 load(Right)
+```{r}
+set.seed(730)
+mypca<-prcomp(X, scale=TRUE)
+
+biplot(mypca,scale=0)
+summary(mypca)
+
+mypca
+
+```

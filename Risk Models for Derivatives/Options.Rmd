@@ -1,0 +1,290 @@
+```{r}
+rm(list=ls())#clear environment
+cat("\014");
+
+setwd("~/YourWD")
+
+library(derivmkts) 
+library(ggplot2) #visualization
+library(data.table) #numerical summaries, etc
+library(derivmkts) #option-related functions
+library(quantmod) #data download
+```
+
+```{r}
+QCOMquotedata<- read.csv(file="QCOMquotedata.dat", header=TRUE, skip=2)
+myoptiondata<- QCOMquotedata[QCOMquotedata$Puts=="QCOM200417P00100000",c(13:22,1)]
+myoptiondata
+```
+
+
+```{r}
+DailyTreasuryYieldCurveRates<- read.csv("DailyTreasuryYieldCurveRates.txt", sep="")
+myrate3MO<- DailyTreasuryYieldCurveRates[DailyTreasuryYieldCurveRates$Date=="2020-02-11",5]*.01
+myrate3MO
+```
+
+```{r}
+StockPrices <- read.csv("StockPrices.txt", sep="")
+mystockdata<-data.table(StockPrices)
+QCOMret<- mystockdata[yyyymmdd%between%c(20190211,20200211),':='(ret=c(NA,diff(log(QCOM)))),]
+QCOMsigma<-round(mystockdata[,sd(ret,na.rm=TRUE)*sqrt(252),],digits=2)
+QCOMsigma
+```
+(5) Calculate time to maturity for PUT option valuation (argument)
++ Purpose: Time to maturity/expiration is an argument in the BS formula
++ Input: StockPrices.txt file, dates from today (2020-02-11) to expiration (2020-04-17).
++ Output: scalar-> trading days between today and expiration. Fraction of a year.
+```{r}
+Date1 <- as.Date("2020-02-11")
+Date2 <- as.Date("2020-04-17")    
+T<-round((sum(!weekdays(seq(Date1, Date2, "days")) %in% c("Saturday", "Sunday"))-1)/252, digits=3)
+T
+```
+
+(6) Setting up the arguments for the PUT option valuation BS function
+- Purpose: Setting up the function for the put with the declared values for each variable
+- Inputs can be found below (Spot price, Strike, risk-free rate, time to matirity, volatility and divident rate. All these values have to be declared for the BS equation. 
+- Output: the BS-estimate for the put value. 
+```{r}
+PutMarketPrice=13.25
+S0=88.57
+K=100.00
+rfree=myrate3MO
+tt=T
+d=0
+sigma=QCOMsigma
+
+QCOMbsput<- bsput(s=S0, k=K,v=sigma, r=rfree,tt=T, d=0)
+QCOMbsput
+```
+(7) Calculating the greeks
+- Purpose: Obtaining the values for option delta and gamma.
+- Input: insert the values declared before into the bsput-function (Spot price, Strike, volatility, risk-free, time to maturity and divident rate). 
+- Output:A vector of numbers Delta, Gamma, rho etc. values for the PUT option.
+```{r}
+putGreeks<-greeks(bsput(s=S0 , k = K, v = sigma, r = rfree, tt = tt, d = d))
+putGreeks
+```
+
+(8) Compute the Implied volatility
+- Purpose: to get the estimate of implied volatility of the stock.
+- Input: The values declared before
+- Output: A vector of one number ( = scalar). This number is the implied volatility of the stock.
+```{r}
+putImpliedVolatility<-bsputimpvol(s = S0, k = K, r = myrate3MO, tt = tt, d = d,
+                                     price = PutMarketPrice)
+putImpliedVolatility
+```
+
+## 2- PUT Options value computed in R using Monte Carlo
+
+(1) Create myST function for PUT option useing MC simulation
+- Purpose of myST: create a function returning the value of a put option using MC simulation. The arguments of the function are: s0 (the value of the stock price now), the mu (the domestic risk-free rate), the sigma (volatility), time to maturity (T), the number of paths (R)
+- Input arguments: contant1 and constant2 are the formulas in th GBM equation, while ST calculates an estimate of the spot price at time T. rnorm is a random draw from the standard normal distribution.
+- Output: An Rvector of length R containing the R replicates of the price ST.
+
+```{r}
+#mu = risk free domestic - risk free foreign
+myST<-function(S0,mu,sigma,T,R) 
+{
+  constant1<-S0*exp((mu-sigma^2/2)*T) #constant 1 from formula (2)
+  constant2<-sigma*sqrt(T) #constant 2 from formula (2)
+  ST<-constant1*exp(constant2*rnorm(n=R))
+  return(ST)
+}
+```
+
+(2) Calculating the estimate of the price at time T with the values declared above
+- Purpose: to get the estimate of the stock price at time T.
+- Input: The values declared above are inserted into the MC formula (S0<-88.57; rfree<-0.0157; sigma<-sigma; T<-0.194; R<-10000; K<-100.00)
+- Output: An Rvector of length R (10 000) containing the estimates of the stock price at time T. 
+```{r}
+set.seed(2240) #starting point to generate a random number sequence
+R<-10000
+ST<-myST(S0=S0,mu=rfree-0,sigma=sigma,T=T,R=R)  #simulating R (1000) STs of underlying
+```
+
+(3) Calculating the payoffs and getting the MC estimate of the put price
+- Purpose: to get the MC estimate of the mean/expected payoff. 
+- Input: For a put, the payoff is K-ST, not possible to have negative values. Declare the Rfunction to calculate payoffs with ifelse. 
+- Output: An Rvector of length R (10000) of the option (put) payoffs. 
+```{r}
+payoff<-ifelse(test=K-ST>0,yes=K-ST,no=0)
+```
+
+- Purpose: To get the MC estimate of put price at time 0. 
+- Inputs: The mean/expected payoff from the R estimates of the option price. The first term discounts this MC price to time 0 (the present value of the put). 
+- Output: A scalar number (the price of the put today). 
+```{r}
+putMC<-exp(-rfree*(T-0))*mean(payoff)
+putMC
+```
+(4) Creating the paths
+- Purpose: To create a function named myGBM to simulate paths of GBM. 
+- Input: The values declared inside "function". 
+- Output: Returns a data.frame with all the paths, tagging them accordingly. 
+```{r}
+myGBM<-function(S0,mu,sigma,T,deltat,R)
+{
+  t<-seq(from=0,to=T,by=deltat)  #create R variable 't' that contains a sequence from 0 to T with increments of deltat
+  result<-NULL #Declare Rfunction 'result' which later returns the value of the Rfunction myGBM.
+  for(r in 1:R) # for loop indexed to r from 1 to R, where R indicates the number of paths, with the purpose of generating multiple paths.
+  {
+    #Apply the Generalized Wiener Process equation and assigned to 'z'. 
+    z<-cumsum(c(0,sqrt(deltat)*rnorm(n=length(t)-1)))#path of Wiener Process
+    s<-exp(log(S0)+(mu-sigma^2/2)*t+sigma*z)#path of GBM from formula (1)
+    #Create a data frame containing time, the generalized Wiener Process, path number, the drift and the difussion
+    temp<-data.frame(time=t,value=s,rep=paste(r),
+                     mu=paste(mu),sigma=paste(sigma)) #temp will have the same lenght every time the for loop is executed
+    result<-rbind(result,temp) #combine one path, stored in 'temp' with those already genenrated
+  }
+  return(result)
+}
+```
+
+(5) Use the formula to create 5 different paths
+- Purpose: To plot the five simulated paths of ST to their corresponding values at specific times.
+- Input: The values declared above and the GBM declared before (S0<-88.57;T<-0.194;deltat<-0.001;R<-5)
+- Output: a data.frame with 975 rows and 5 columns. GGplot returns a plot showing 5 simulated paths
+
+```{r}
+set.seed(2240) # set.seed sets the starting point for the sequence of random generated numbers
+deltat<- 0.001; R<-5
+temp<-myGBM(S0=S0,mu=rfree,sigma=sigma,
+                                T=T,deltat=deltat,R=R)
+ggplot(data=temp,aes(x=time,y=value,col=rep))+geom_line()+theme(legend.position="none")
+```
+
+### 
+(1) Calculation of the butterfly-spread strategy payoffs
+- Purpose: Obtaining the relevant part from the data download, i.e. stock price data for the implementation of the strategy
+- Inputs for the extraction 'myticker','mystart' and 'myend'
+- Output:Data frame of 239 rows and 7 columns
+```{r}
+myticker<-'CELG' #The desired ticker
+mystart<-'2018-10-09' #Start date
+myend<-'2019-09-23' #End date
+
+#Based on the inputs above, we extract the desired data from the data download, and assign it to 'mydata'
+mydata<-getSymbols.yahoo(Symbols=myticker,from=mystart,to=myend,auto.assign=FALSE)
+
+#Outputs of 'mydata'
+head(mydata) #Displays the head of 'mydata'
+tail(mydata) #Displays the tail of 'mydata'
+```
+
+(2) Dates as date format
+- Purpose: Transform the format of the dates for later purposes
+- Inputs: 'mystart' and 'myend' which are the dates corresponding to 2018-10-09 and 2019-09-23
+- Output:Data frame of 239 rows and 7 columns
+```{r}
+mystart<-time(mydata)[1] #adjust 'start' date to the first available date = 'today' (in 'Date' format)
+myend<-time(mydata)[length(time(mydata))] #adjust 'end' date to the last available date = expiry date (in 'Date' format)
+mydata<-as.data.frame(mydata) #We coerce 'mydata' to a data frame
+mydata$time<-round(x=seq(from=0,to=(nrow(mydata)-1)/252,by=1/252),digits=4) #We add a column 'time' to the data frame. This column states a date as a value of cumulative date values from the start, where one date is equal to 1/252
+
+head(mydata)
+tail(mydata)
+```
+
+(3) Calculate Implied volatility
+- Purpose: In order to calculate the value of the options, we need to calculate the implied volatility. This is calculated from historical stock prises, in this case a time frame of one year ending at the start of 'mydata'
+- Input: 'mystart' corresponding to 2018-10-09  
+- Output: Based on the inputs above, we extract the desired data from the data download, and assign it to 'myhistdata'
+```{r}
+myhiststart<-mystart-365 #Start date
+myhistend<-mystart #End date
+
+myhistdata<-getSymbols.yahoo(myticker,from=myhiststart,to=myhistend, auto.assign=FALSE)
+myhistdata<-as.data.frame(myhistdata) #We coerce 'myhistdata' to a data frame
+
+#Using 'myhisdata', we estimate the implied volatility (SIGMA) and round it to 4 digits
+SIGMA<-round(x=sd(diff(log(myhistdata[,6])))*sqrt(252),digits=4)
+```
+
+(3) Extract the expiry time and risk free 
++ Purpose: Time to maturity/expiration and risk-free rate are arguments in the BS formula
++ Input: 'mydata' dataframe for T and 'DGS3MO' to extract risk-free variable based on symbol constituting of a 3-month treasury rate.
++ Output: scalar-> trading days between today and expiration. Fraction of a year and the rfree rate
+```{r}
+#We extract the expiry time and assign it to T
+T<-tail(x=mydata$time,n=1)
+
+##Finally, we need to obtain the risk-free rates in order to calculate the value of the options.
+mysymbol<-'DGS3MO' #Extracting risk-free variable based on symbol'', constituting of a 3-month treasury rate.
+myratedata<-getSymbols(Symbols=mysymbol,src='FRED',auto.assign =FALSE) #Sourcing the variable from Federal reserve db(FRED)
+                         
+RFREE<-myratedata[time(myratedata)==mystart][[1]]*0.01 #We obtain the risk-free rate for the first date of our time-frame and convert it from percentages to decimals
+RFREE
+```
+
+(4) Setting up the arguments for the PUT option valuation BS function
+By extending the data.frame mydata with the additional section "time" in order to calculate the time to maturity contained in the BS formula. Declaring the strike prices of the long puts with K1 and K3 in order to obtain the strike price for two short puts with K2. 
+
+```{r}
+time<-mydata$time #Designating a time variable to the data.frame 
+S<-round(x=mydata[,6],digits=4)
+TTE<-T-mydata$time #time to expiration
+K1<-90.9;
+K3<-100.5
+K2<-(K1+K3)/2
+#Implementing the obtained variables to the BS formula to value the puts
+#p1 = value of put in regard to K1
+#p3 = value of put in regard to K2
+#p2 = value of pur in regard to (K1+K3)/2
+p1<-bsput(s=S,k=K1,v=SIGMA,r=RFREE,tt=TTE,d=0)
+p1<-round(x=p1,digits=4)
+
+p3<-bsput(s=S,k=K3,v=SIGMA,r=RFREE,tt=TTE,d=0)
+p3<-round(x=p3,digits=4)
+
+p2<-bsput(s=S,k=K2,v=SIGMA,r=RFREE,tt=TTE,d=0)
+p2<-round(x=p2,digits=4)
+
+p1[1];p2[1];p3[1]
+p1[236];p2[236];p3[236]
+```
+(5) Calculate payoffs for every strike price
+```{r}
+payoff1<-ifelse(test=K1-S>0,yes=K1-S,no=0);
+payoff1<-round(x=payoff1,digits=4)
+
+payoff3<-ifelse(test=K3-S>0,yes=K3-S,no=0);
+payoff3<-round(x=payoff3,digits=4)
+
+payoff2<--ifelse(test=K2-S>0,yes=K2-S,no=0);
+payoff2<-round(x=payoff2,digits=4)
+
+payoff1[1];payoff2[1];payoff3[1]
+payoff1[236];payoff2[236];payoff3[236]
+S[239]
+```
+(5) Calculate total payoff and profit
+- Purpose: Calculate the profit (profit=the total payoff minus the initial investment), negative profit = loss
+- Input for payoff: 'payoff1', 'payoff2'and 'payoff2'.The payoff from the put with strike K1, K2 and K3, respectively
+- Input for profit: p1[1]=price of the put with strike K1 at time 0, p3[1]=price of the put with strike K3 at time 0 and p2[1]=price of the put with strike K2 at time 0
+```{r}
+payoff<-payoff1+2*payoff2+payoff3;
+payoff<-round(x=payoff,digits=4)
+payoff[239]
+
+profit<-payoff-(p1[1]+p3[1]-2*p2[1]);
+profit<-round(x=profit,digits=4)
+profit[239] 
+```
+(6) Create a data.table with the relevant variables for plotting. Input: core components for Black-scholes. Reason is to set the five variables that are interpreted in the panels. - purpose: source material for the utilised plots. 
+(7) Re-shape/melt the data.table for the purpose of plotting in ggplot2. The Y-axis range is set to free boundaries in order to display the proper interval for profit and payoff.
+- purpose: visualisation will not be sufficient if the boundary of the y-axis is static. 
+(8) Obtain the multi-panel figure in ggplot2. Purpose: The multi-panel graphs illustrate the short butterfly spread characteristics. When the price of the stock is visible in the chosen plots we can observe how different option prices have a negative correlation with the stock price. The visuals also aid in terms of describing payoff in regard to the position that that is chosen. The position-payoff is directly linked to stock price and exercise price.
+```{r}
+#First we create a data.table as source for the plots.
+mydt<-data.table(time,S,TTE,p1,p2,p3,payoff1,payoff2,payoff3,payoff,profit)
+mydtmolten<-melt.data.table(data=mydt,id.vars='time')
+mydtmolten
+
+#Extracting the multi-panel-tables that are displayed in ggplot
+ff<-ggplot(data=mydtmolten,aes(x=time,y=value))+geom_line()
+ff<-ff+facet_wrap(.~variable,ncol=5,scales="free_y")
+print(ff)
+```
